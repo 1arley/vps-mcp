@@ -9,21 +9,24 @@ const fs = require("fs").promises;
 const execp = promisify(exec);
 const app = express();
 
-const AUTH_TOKEN = process.env.AUTH_TOKEN || "";
+const AUTH_TOKEN = process.env.AUTH_TOKEN;
+
+if (!AUTH_TOKEN) {
+  console.error("AUTH_TOKEN nao definido. Recusando iniciar sem auth.");
+  process.exit(1);
+}
 
 app.use(express.json());
 
-if (AUTH_TOKEN) {
-  app.use((req, res, next) => {
-    if (req.path === "/health" || req.path === "/") return next();
-    const auth = req.headers.authorization || "";
-    const token = auth.replace(/^Bearer\s+/i, "") || req.query.token;
-    if (token !== AUTH_TOKEN) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-    next();
-  });
-}
+app.use((req, res, next) => {
+  if (req.path === "/health" || req.path === "/") return next();
+  const auth = req.headers.authorization || "";
+  const token = auth.replace(/^Bearer\s+/i, "");
+  if (token !== AUTH_TOKEN) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+});
 
 function run(cmd) {
   return execp(cmd, { timeout: 60000 })
