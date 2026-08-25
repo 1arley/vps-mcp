@@ -1,15 +1,30 @@
 {
-  "name": "my-mcp",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "vps-observer-mcp",
+  "version": "2.0.0",
+  "description": "Servidor MCP remoto, autenticado e somente leitura para observabilidade controlada de containers Docker.",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "check": "node --check server.js && node --check docker-gateway.js",
+    "test": "node --test"
   },
-  "keywords": [],
+  "keywords": [
+    "mcp",
+    "docker",
+    "observability",
+    "security"
+  ],
   "type": "commonjs",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "express": "^5.2.1"
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "express": "5.2.1",
+    "express-rate-limit": "8.6.2",
+    "zod": "4.3.6"
+  },
+  "overrides": {
+    "hono": "4.13.4"
   }
 }
