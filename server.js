@@ -279,12 +279,60 @@ class DockerGatewayClient {
     }
   }
 
+  async requestPost(pathname, body = {}) {
+    const url = new URL(pathname, this.baseUrl);
+    if (url.origin !== this.baseUrl.origin) throw new DependencyError("Destino interno invalido");
+
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        redirect: "error",
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch {
+      throw new DependencyError("Gateway Docker indisponivel");
+    }
+
+    const respBody = await readLimitedBody(response, this.maxResponseBytes);
+    if (!response.ok) {
+      throw new DependencyError(`Gateway Docker respondeu com status ${response.status}`);
+    }
+    if (response.status === 204) return { ok: true };
+    try {
+      return JSON.parse(respBody.toString("utf8"));
+    } catch {
+      throw new DependencyError("Resposta invalida do gateway Docker");
+    }
+  }
+
   listContainers() {
     return this.request("/v1/containers");
   }
 
   containerLogs(name, tail) {
     return this.request(`/v1/containers/${encodeURIComponent(name)}/logs?tail=${tail}`);
+  }
+
+  startContainer(name) {
+    return this.requestPost(`/v1/containers/${encodeURIComponent(name)}/start`);
+  }
+
+  stopContainer(name) {
+    return this.requestPost(`/v1/containers/${encodeURIComponent(name)}/stop`);
+  }
+
+  restartContainer(name) {
+    return this.requestPost(`/v1/containers/${encodeURIComponent(name)}/restart`);
+  }
+
+  execInContainer(name, cmd) {
+    return this.requestPost(`/v1/containers/${encodeURIComponent(name)}/exec`, { cmd });
   }
 }
 
@@ -408,6 +456,7 @@ function createMcpServer(gateway, options = {}) {
       allowlist: options.opsAllowlist,
       log,
       pgEnv: options.pgEnv,
+      gateway,
     });
   }
 

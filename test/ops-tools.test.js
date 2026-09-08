@@ -56,7 +56,15 @@ test("sanitizeOutput remove controles e limita tamanho", () => {
 
 function serverWith(allowlist) {
   const server = new McpServer({ name: "ops-test", version: "1.0.0" });
-  registerOpsTools(server, { allowlist, log: () => {}, pgEnv: { host: "postgres", user: "ops", password: "" } });
+  const mockGateway = {
+    listContainers: async () => ({ containers: [] }),
+    containerLogs: async () => { throw new Error("gateway offline"); },
+    startContainer: async () => { throw new Error("gateway offline"); },
+    stopContainer: async () => { throw new Error("gateway offline"); },
+    restartContainer: async () => { throw new Error("gateway offline"); },
+    execInContainer: async () => { throw new Error("gateway offline"); },
+  };
+  registerOpsTools(server, { allowlist, log: () => {}, pgEnv: { host: "postgres", user: "ops", password: "" }, gateway: mockGateway });
   return server;
 }
 
@@ -82,7 +90,7 @@ test("tools de operacao negam fora da allowlist", async () => {
   assert.match(deniedRestart.content[0].text, /Negado pela allowlist/);
 
   const allowedRestart = await server._registeredTools.docker_restart.handler({ name: "web-1" });
-  assert.match(allowedRestart.content[0].text, /Negado|no such container|Error|denied|not found/i);
+  assert.match(allowedRestart.content[0].text, /Negado|no such container|Error|denied|not found|Falha/i);
 
   const deniedExec = await server._registeredTools.docker_exec.handler({ name: "web-1", cmd: "cat /etc/passwd" });
   assert.match(deniedExec.content[0].text, /Negado pela allowlist/);
@@ -95,10 +103,4 @@ test("tools de operacao negam fora da allowlist", async () => {
 
   const deniedPg = await server._registeredTools.pg_query.handler({ database: "outra-base", query: "select 1" });
   assert.match(deniedPg.content[0].text, /Negado pela allowlist/);
-
-  const deniedCompose = await server._registeredTools.docker_compose.handler({ dir: "/etc", args: "up -d" });
-  assert.match(deniedCompose.content[0].text, /Negado pela allowlist/);
-
-  const badArgs = await server._registeredTools.docker_compose.handler({ dir: "/srv/apps", args: "up -d; rm -rf /" });
-  assert.match(badArgs.content[0].text, /caracteres proibidos/);
 });

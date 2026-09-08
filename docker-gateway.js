@@ -116,6 +116,17 @@ async function readLimited(response, limitBytes, truncate = false) {
   return { body: Buffer.concat(chunks, total), truncated: wasTruncated };
 }
 
+async function readBody(req, limitBytes) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > limitBytes) throw new DockerProxyError("Request body excedeu o limite");
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
 async function dockerRequest(config, pathname, { logStream = false } = {}) {
   const url = new URL(pathname, config.dockerProxyUrl);
   if (url.origin !== config.dockerProxyUrl.origin) throw new DockerProxyError("Destino Docker invalido");
@@ -135,6 +146,26 @@ async function dockerRequest(config, pathname, { logStream = false } = {}) {
     logStream ? config.maxLogBytes : config.maxDockerJsonBytes,
     logStream,
   );
+}
+
+async function dockerPostRequest(config, pathname, body) {
+  const url = new URL(pathname, config.dockerProxyUrl);
+  if (url.origin !== config.dockerProxyUrl.origin) throw new DockerProxyError("Destino Docker invalido");
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      redirect: "error",
+      signal: AbortSignal.timeout(config.dockerTimeoutMs),
+    });
+  } catch {
+    throw new DockerProxyError("Proxy Docker indisponivel");
+  }
+  if (response.status === 204) return { body: Buffer.alloc(0), truncated: false };
+  if (!response.ok) throw new DockerProxyError(`Proxy Docker retornou ${response.status}`);
+  return readLimited(response, config.maxDockerJsonBytes, false);
 }
 
 function safeDockerString(value, maxLength = 256) {
@@ -198,6 +229,30 @@ function decodeDockerLogBuffer(buffer) {
   return Buffer.concat(payloads).toString("utf8");
 }
 
+function decodeExecStream(buffer) {
+  if (buffer.length < 8) return buffer.toString("utf8");
+
+  const streamType = buffer[0];
+  if (streamType !== 1 && streamType !== 2) return buffer.toString("utf8");
+  if (buffer[1] !== 0 || buffer[2] !== 0 || buffer[3] !== 0) return buffer.toString("utf8");
+
+  const payloads = [];
+  let offset = 0;
+  while (offset + 8 <= buffer.length) {
+    const type = buffer[offset];
+    if (type !== 1 && type !== 2) break;
+    if (buffer[offset + 1] !== 0 || buffer[offset + 2] !== 0 || buffer[offset + 3] !== 0) break;
+
+    const size = buffer.readUInt32BE(offset + 4);
+    const payloadStart = offset + 8;
+    const payloadEnd = Math.min(payloadStart + size, buffer.length);
+    payloads.push(buffer.subarray(payloadStart, payloadEnd));
+    offset = payloadEnd;
+  }
+
+  return Buffer.concat(payloads).toString("utf8");
+}
+
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
@@ -207,6 +262,14 @@ function sendJson(res, status, payload) {
     "X-Content-Type-Options": "nosniff",
   });
   res.end(body);
+}
+
+function parseContainerName(encoded) {
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return null;
+  }
 }
 
 function createGatewayServer(config) {
@@ -221,11 +284,6 @@ function createGatewayServer(config) {
       });
     });
 
-    if (req.method !== "GET") {
-      res.setHeader("Allow", "GET");
-      return sendJson(res, 405, { error: "Method Not Allowed" });
-    }
-
     let requestUrl;
     try {
       requestUrl = new URL(req.url, "http://docker-gateway.internal");
@@ -234,69 +292,180 @@ function createGatewayServer(config) {
     }
 
     try {
-      if (requestUrl.pathname === "/healthz") {
-        const { body } = await dockerRequest(config, "/_ping");
-        const healthy = body.toString("utf8").trim() === "OK";
-        return sendJson(res, healthy ? 200 : 503, {
-          status: healthy ? "ok" : "unavailable",
-        });
-      }
-
-      if (requestUrl.pathname === "/v1/containers") {
-        const { body } = await dockerRequest(config, "/containers/json?all=1");
-        const rawContainers = JSON.parse(body.toString("utf8"));
-        if (!Array.isArray(rawContainers)) throw new DockerProxyError("Resposta Docker invalida");
-        const containers = rawContainers
-          .map((container) => normalizeContainer(container, config.allowedContainers))
-          .filter(Boolean)
-          .map((container) => container.public)
-          .sort((left, right) => left.name.localeCompare(right.name));
-        return sendJson(res, 200, { containers });
-      }
-
-      const match = /^\/v1\/containers\/([^/]+)\/logs$/.exec(requestUrl.pathname);
-      if (match) {
-        if (!config.enableDockerLogs) return sendJson(res, 404, { error: "Not Found" });
-        let name;
-        try {
-          name = decodeURIComponent(match[1]);
-        } catch {
-          return sendJson(res, 400, { error: "Bad Request" });
-        }
-        if (!config.allowedContainers.has(name)) return sendJson(res, 404, { error: "Not Found" });
-        const tail = Number(requestUrl.searchParams.get("tail") || "100");
-        if (!Number.isSafeInteger(tail) || tail < 1 || tail > 1000) {
-          return sendJson(res, 400, { error: "Bad Request" });
+      if (req.method === "GET") {
+        if (requestUrl.pathname === "/healthz") {
+          const { body } = await dockerRequest(config, "/_ping");
+          const healthy = body.toString("utf8").trim() === "OK";
+          return sendJson(res, healthy ? 200 : 503, {
+            status: healthy ? "ok" : "unavailable",
+          });
         }
 
-        const { body: listBody } = await dockerRequest(config, "/containers/json?all=1");
-        const rawContainers = JSON.parse(listBody.toString("utf8"));
-        const container = Array.isArray(rawContainers)
-          ? rawContainers
-              .map((item) => normalizeContainer(item, config.allowedContainers))
-              .find((item) => item?.public.name === name)
-          : null;
-        if (!container?.id) return sendJson(res, 404, { error: "Not Found" });
+        if (requestUrl.pathname === "/v1/containers") {
+          const { body } = await dockerRequest(config, "/containers/json?all=1");
+          const rawContainers = JSON.parse(body.toString("utf8"));
+          if (!Array.isArray(rawContainers)) throw new DockerProxyError("Resposta Docker invalida");
+          const containers = rawContainers
+            .map((container) => normalizeContainer(container, config.allowedContainers))
+            .filter(Boolean)
+            .map((container) => container.public)
+            .sort((left, right) => left.name.localeCompare(right.name));
+          return sendJson(res, 200, { containers });
+        }
 
-        const query = new URLSearchParams({
-          stdout: "1",
-          stderr: "1",
-          timestamps: "1",
-          tail: String(tail),
-        });
-        const { body, truncated } = await dockerRequest(
-          config,
-          `/containers/${container.id}/logs?${query}`,
-          { logStream: true },
-        );
-        return sendJson(res, 200, {
-          container: name,
-          logs: decodeDockerLogBuffer(body),
-          truncated,
-        });
+        const logsMatch = /^\/v1\/containers\/([^/]+)\/logs$/.exec(requestUrl.pathname);
+        if (logsMatch) {
+          if (!config.enableDockerLogs) return sendJson(res, 404, { error: "Not Found" });
+          const name = parseContainerName(logsMatch[1]);
+          if (!name) return sendJson(res, 400, { error: "Bad Request" });
+          if (!config.allowedContainers.has(name)) return sendJson(res, 404, { error: "Not Found" });
+          const tail = Number(requestUrl.searchParams.get("tail") || "100");
+          if (!Number.isSafeInteger(tail) || tail < 1 || tail > 1000) {
+            return sendJson(res, 400, { error: "Bad Request" });
+          }
+
+          const { body: listBody } = await dockerRequest(config, "/containers/json?all=1");
+          const rawContainers = JSON.parse(listBody.toString("utf8"));
+          const container = Array.isArray(rawContainers)
+            ? rawContainers
+                .map((item) => normalizeContainer(item, config.allowedContainers))
+                .find((item) => item?.public.name === name)
+            : null;
+          if (!container?.id) return sendJson(res, 404, { error: "Not Found" });
+
+          const query = new URLSearchParams({
+            stdout: "1",
+            stderr: "1",
+            timestamps: "1",
+            tail: String(tail),
+          });
+          const { body, truncated } = await dockerRequest(
+            config,
+            `/containers/${container.id}/logs?${query}`,
+            { logStream: true },
+          );
+          return sendJson(res, 200, {
+            container: name,
+            logs: decodeDockerLogBuffer(body),
+            truncated,
+          });
+        }
+
+        return sendJson(res, 404, { error: "Not Found" });
       }
 
-      return sendJson(res, 404, { error: "Not Found" });
+      if (req.method === "POST") {
+        const startMatch = /^\/v1\/containers\/([^/]+)\/start$/.exec(requestUrl.pathname);
+        if (startMatch) {
+          const name = parseContainerName(startMatch[1]);
+          if (!name) return sendJson(res, 400, { error: "Bad Request" });
+          if (!config.allowedContainers.has(name)) return sendJson(res, 404, { error: "Not Found" });
+
+          const { body: listBody } = await dockerRequest(config, "/containers/json?all=1");
+          const rawContainers = JSON.parse(listBody.toString("utf8"));
+          const container = Array.isArray(rawContainers)
+            ? rawContainers
+                .map((item) => normalizeContainer(item, config.allowedContainers))
+                .find((item) => item?.public.name === name)
+            : null;
+          if (!container?.id) return sendJson(res, 404, { error: "Not Found" });
+
+          await dockerPostRequest(config, `/containers/${container.id}/start`, {});
+          return sendJson(res, 200, { ok: true });
+        }
+
+        const stopMatch = /^\/v1\/containers\/([^/]+)\/stop$/.exec(requestUrl.pathname);
+        if (stopMatch) {
+          const name = parseContainerName(stopMatch[1]);
+          if (!name) return sendJson(res, 400, { error: "Bad Request" });
+          if (!config.allowedContainers.has(name)) return sendJson(res, 404, { error: "Not Found" });
+
+          const { body: listBody } = await dockerRequest(config, "/containers/json?all=1");
+          const rawContainers = JSON.parse(listBody.toString("utf8"));
+          const container = Array.isArray(rawContainers)
+            ? rawContainers
+                .map((item) => normalizeContainer(item, config.allowedContainers))
+                .find((item) => item?.public.name === name)
+            : null;
+          if (!container?.id) return sendJson(res, 404, { error: "Not Found" });
+
+          await dockerPostRequest(config, `/containers/${container.id}/stop`, {});
+          return sendJson(res, 200, { ok: true });
+        }
+
+        const restartMatch = /^\/v1\/containers\/([^/]+)\/restart$/.exec(requestUrl.pathname);
+        if (restartMatch) {
+          const name = parseContainerName(restartMatch[1]);
+          if (!name) return sendJson(res, 400, { error: "Bad Request" });
+          if (!config.allowedContainers.has(name)) return sendJson(res, 404, { error: "Not Found" });
+
+          const { body: listBody } = await dockerRequest(config, "/containers/json?all=1");
+          const rawContainers = JSON.parse(listBody.toString("utf8"));
+          const container = Array.isArray(rawContainers)
+            ? rawContainers
+                .map((item) => normalizeContainer(item, config.allowedContainers))
+                .find((item) => item?.public.name === name)
+            : null;
+          if (!container?.id) return sendJson(res, 404, { error: "Not Found" });
+
+          await dockerPostRequest(config, `/containers/${container.id}/restart`, {});
+          return sendJson(res, 200, { ok: true });
+        }
+
+        const execMatch = /^\/v1\/containers\/([^/]+)\/exec$/.exec(requestUrl.pathname);
+        if (execMatch) {
+          const name = parseContainerName(execMatch[1]);
+          if (!name) return sendJson(res, 400, { error: "Bad Request" });
+          if (!config.allowedContainers.has(name)) return sendJson(res, 404, { error: "Not Found" });
+
+          const reqBodyRaw = await readBody(req, 64 * 1024);
+          let reqBody;
+          try {
+            reqBody = JSON.parse(reqBodyRaw.toString("utf8"));
+          } catch {
+            return sendJson(res, 400, { error: "Invalid JSON" });
+          }
+          if (!reqBody.cmd || typeof reqBody.cmd !== "string") {
+            return sendJson(res, 400, { error: "cmd e obrigatorio" });
+          }
+
+          const { body: listBody } = await dockerRequest(config, "/containers/json?all=1");
+          const rawContainers = JSON.parse(listBody.toString("utf8"));
+          const container = Array.isArray(rawContainers)
+            ? rawContainers
+                .map((item) => normalizeContainer(item, config.allowedContainers))
+                .find((item) => item?.public.name === name)
+            : null;
+          if (!container?.id) return sendJson(res, 404, { error: "Not Found" });
+
+          const { body: createBody } = await dockerPostRequest(
+            config,
+            `/containers/${container.id}/exec`,
+            {
+              AttachStdout: true,
+              AttachStderr: true,
+              Tty: false,
+              Cmd: ["sh", "-c", reqBody.cmd],
+            },
+          );
+          const execId = JSON.parse(createBody.toString("utf8")).Id;
+
+          const { body: startBody, truncated } = await dockerPostRequest(
+            config,
+            `/exec/${execId}/start`,
+            { Detach: false, Tty: false },
+          );
+          const output = decodeExecStream(startBody);
+
+          return sendJson(res, 200, { output, truncated });
+        }
+
+        res.setHeader("Allow", "GET");
+        return sendJson(res, 405, { error: "Method Not Allowed" });
+      }
+
+      res.setHeader("Allow", "GET, POST");
+      return sendJson(res, 405, { error: "Method Not Allowed" });
     } catch (error) {
       gatewayLog("error", "docker_proxy_error", { kind: error.constructor.name });
       return sendJson(res, 502, { error: "Docker backend unavailable" });
@@ -345,6 +514,7 @@ module.exports = {
   GatewayConfigurationError,
   createGatewayServer,
   decodeDockerLogBuffer,
+  decodeExecStream,
   loadGatewayConfig,
   normalizeContainer,
   readLimited,

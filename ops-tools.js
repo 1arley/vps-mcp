@@ -134,34 +134,19 @@ function loadOpsAllowlist(filePath) {
   };
 }
 
-async function dockerTable() {
-  const result = await runCommand(
-    "docker ps -a --format '{{json .}}' 2>/dev/null || docker ps --format '{{json .}}'",
-    { timeout: 30000 },
+function formatContainersTable(containers) {
+  const header = "NAMES\tSTATUS\tIMAGE";
+  const body = containers.map(
+    (c) => `${c.name}\t${c.status}\t${c.image}`,
   );
-  const rows = [];
-  for (const line of result.stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const entry = JSON.parse(trimmed);
-      rows.push({
-        name: String(entry.Names || "").replace(/^\//, ""),
-        status: String(entry.Status || ""),
-        ports: String(entry.Ports || ""),
-        image: String(entry.Image || ""),
-      });
-    } catch {
-      continue;
-    }
-  }
-  return rows;
+  return header + (body.length ? "\n" + body.join("\n") : "\n(sem containers)");
 }
 
 function registerOpsTools(server, deps) {
   const allowlist = deps.allowlist;
   const log = deps.log || (() => {});
   const pg = deps.pgEnv || { host: "postgres", user: "postgres", password: "" };
+  const gateway = deps.gateway;
   const opsAnnotations = {
     readOnlyHint: false,
     destructiveHint: true,
@@ -203,11 +188,15 @@ function registerOpsTools(server, deps) {
       annotations: readOnlyAnnotations,
     },
     async () => {
-      const rows = await dockerTable();
-      const allowed = rows.filter((row) => isAllowed(allowlist.docker.containers, row.name));
-      const header = "NAMES\tSTATUS\tPORTS\tIMAGE";
-      const body = allowed.map((row) => `${row.name}\t${row.status}\t${row.ports}\t${row.image}`);
-      return textResult(header + (body.length ? "\n" + body.join("\n") : "\n(sem containers na allowlist)"));
+      try {
+        const result = await gateway.listContainers();
+        const containers = result.containers || [];
+        const allowed = containers.filter((c) => isAllowed(allowlist.docker.containers, c.name));
+        return textResult(formatContainersTable(allowed));
+      } catch (error) {
+        log("error", "ops_docker_ps_error", { kind: error.constructor.name });
+        return textResult("Falha ao listar containers via gateway.", true);
+      }
     },
   );
 
@@ -224,12 +213,13 @@ function registerOpsTools(server, deps) {
     },
     async ({ name, tail = 100 }) => {
       if (!isAllowed(allowlist.docker.containers, name)) return denied("docker_logs");
-      const result = await runCommand(`docker logs --tail ${Number(tail)} ${name} 2>&1`, {
-        timeout: 30000,
-        maxOutput: OPS_MAX_OUTPUT,
-      });
-      if (result.code === 0) return textResult(result.stdout);
-      return textResult(sanitizeOutput(result.stdout) + (result.stderr ? `\n${sanitizeOutput(result.stderr)}` : ""), true);
+      try {
+        const result = await gateway.containerLogs(name, tail);
+        return textResult(result.logs || "");
+      } catch (error) {
+        log("error", "ops_docker_logs_error", { container: name, kind: error.constructor.name });
+        return textResult(`Falha ao obter logs do container "${name}".`, true);
+      }
     },
   );
 
@@ -245,9 +235,15 @@ function registerOpsTools(server, deps) {
       },
       async ({ name }) => {
         if (!isAllowed(allowlist.docker.containers, name)) return denied(action);
-        const result = await runCommand(`docker ${dockerVerb} ${name} 2>&1`, { timeout: 60000 });
-        if (result.code === 0) return textResult(sanitizeOutput(result.stdout) || `OK: ${dockerVerb} ${name}`);
-        return textResult(sanitizeOutput(result.stdout + (result.stderr ? "\n" + result.stderr : "")), true);
+        try {
+          if (action === "docker_restart") await gateway.restartContainer(name);
+          else if (action === "docker_start") await gateway.startContainer(name);
+          else if (action === "docker_stop") await gateway.stopContainer(name);
+          return textResult(`OK: ${dockerVerb} ${name}`);
+        } catch (error) {
+          log("error", `ops_${action}_error`, { container: name, kind: error.constructor.name });
+          return textResult(`Falha ao executar ${dockerVerb} no container "${name}".`, true);
+        }
       },
     );
   }
@@ -267,34 +263,13 @@ function registerOpsTools(server, deps) {
     async ({ name, cmd }) => {
       if (!execRuleMatches(allowlist.docker.exec, name, cmd)) return denied("docker_exec");
       log("info", "ops_docker_exec", { container: name, cmd: sanitizeOutput(cmd, 256) });
-      const result = await runCommand(`docker exec -i ${name} /bin/sh -c ${JSON.stringify(cmd)} 2>&1`, {
-        timeout: 60000,
-      });
-      if (result.code === 0) return textResult(result.stdout);
-      return textResult(sanitizeOutput(result.stdout + (result.stderr ? "\n" + result.stderr : "")), true);
-    },
-  );
-
-  server.registerTool(
-    "docker_compose",
-    {
-      title: "Executa docker compose em diretório",
-      description:
-        "Executa \`docker compose <args>\` no diretório permitido. Args só podem conter caracteres simples.",
-      inputSchema: { dir: z.string().min(1).max(512), args: z.string().min(1).max(512) },
-      annotations: opsAnnotations,
-    },
-    async ({ dir, args }) => {
-      if (!isAllowed(allowlist.compose.dirs, dir)) return denied("docker_compose");
-      if (!SAFE_SHELL_FREE.test(args)) {
-        return textResult("Args do docker compose contêm caracteres proibidos.", true);
+      try {
+        const result = await gateway.execInContainer(name, cmd);
+        return textResult(result.output || "");
+      } catch (error) {
+        log("error", "ops_docker_exec_error", { container: name, kind: error.constructor.name });
+        return textResult(`Falha ao executar comando no container "${name}".`, true);
       }
-      log("info", "ops_compose", { dir, args: sanitizeOutput(args, 128) });
-      const result = await runCommand(`cd ${JSON.stringify(dir)} && docker compose ${args} 2>&1`, {
-        timeout: 120000,
-      });
-      if (result.code === 0) return textResult(result.stdout);
-      return textResult(sanitizeOutput(result.stdout + (result.stderr ? "\n" + result.stderr : "")), true);
     },
   );
 
