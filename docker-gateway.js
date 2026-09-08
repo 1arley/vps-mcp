@@ -1,6 +1,7 @@
 "use strict";
 
 const http = require("node:http");
+const fs = require("node:fs");
 
 const GATEWAY_SERVICE_NAME = process.env.SERVICE_NAME || "docker-read-gateway";
 
@@ -43,19 +44,23 @@ function loadGatewayConfig(env = process.env) {
     );
   }
 
-  let dockerProxyUrl;
-  try {
-    dockerProxyUrl = new URL(env.DOCKER_PROXY_URL || "http://docker-proxy:2375");
-  } catch {
-    throw new GatewayConfigurationError("DOCKER_PROXY_URL invalida");
-  }
-  if (dockerProxyUrl.protocol !== "http:" || dockerProxyUrl.username || dockerProxyUrl.password) {
-    throw new GatewayConfigurationError("DOCKER_PROXY_URL deve ser HTTP e nao pode conter credenciais");
+  const dockerSocketPath = env.DOCKER_SOCKET_PATH || "";
+  let dockerProxyUrl = null;
+  if (!dockerSocketPath) {
+    try {
+      dockerProxyUrl = new URL(env.DOCKER_PROXY_URL || "http://docker-proxy:2375");
+    } catch {
+      throw new GatewayConfigurationError("DOCKER_PROXY_URL invalida");
+    }
+    if (dockerProxyUrl.protocol !== "http:" || dockerProxyUrl.username || dockerProxyUrl.password) {
+      throw new GatewayConfigurationError("DOCKER_PROXY_URL deve ser HTTP e nao pode conter credenciais");
+    }
   }
 
   return Object.freeze({
     port: parseInteger(env.GATEWAY_PORT, 8080, 1, 65535, "GATEWAY_PORT"),
     allowedContainers: new Set(allowedContainers),
+    dockerSocketPath,
     dockerProxyUrl,
     dockerTimeoutMs: parseInteger(env.DOCKER_TIMEOUT_MS, 8_000, 500, 30_000, "DOCKER_TIMEOUT_MS"),
     maxDockerJsonBytes: parseInteger(
@@ -127,7 +132,51 @@ async function readBody(req, limitBytes) {
   return Buffer.concat(chunks);
 }
 
+function socketRequest(config, method, pathname, { body = null, logStream = false } = {}) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      req.destroy();
+      reject(new DockerProxyError("Proxy Docker timeout"));
+    }, config.dockerTimeoutMs);
+
+    const req = http.request(
+      {
+        socketPath: config.dockerSocketPath,
+        path: pathname,
+        method,
+        headers: body ? { "Content-Type": "application/json" } : {},
+      },
+      (res) => {
+        clearTimeout(timeout);
+        if (res.statusCode === 204) {
+          res.resume();
+          resolve({ body: Buffer.alloc(0), truncated: false, statusCode: 204 });
+          return;
+        }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          res.resume();
+          reject(new DockerProxyError(`Proxy Docker retornou ${res.statusCode}`));
+          return;
+        }
+        readLimited(res, logStream ? config.maxLogBytes : config.maxDockerJsonBytes, logStream)
+          .then((result) => resolve({ ...result, statusCode: res.statusCode }))
+          .catch(reject);
+      },
+    );
+    req.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(new DockerProxyError("Proxy Docker indisponivel: " + err.message));
+    });
+    if (body) req.end(JSON.stringify(body));
+    else req.end();
+  });
+}
+
 async function dockerRequest(config, pathname, { logStream = false } = {}) {
+  if (config.dockerSocketPath) {
+    const result = await socketRequest(config, "GET", pathname, { logStream });
+    return result;
+  }
   const url = new URL(pathname, config.dockerProxyUrl);
   if (url.origin !== config.dockerProxyUrl.origin) throw new DockerProxyError("Destino Docker invalido");
   let response;
@@ -149,6 +198,9 @@ async function dockerRequest(config, pathname, { logStream = false } = {}) {
 }
 
 async function dockerPostRequest(config, pathname, body) {
+  if (config.dockerSocketPath) {
+    return socketRequest(config, "POST", pathname, { body });
+  }
   const url = new URL(pathname, config.dockerProxyUrl);
   if (url.origin !== config.dockerProxyUrl.origin) throw new DockerProxyError("Destino Docker invalido");
   let response;
@@ -294,6 +346,14 @@ function createGatewayServer(config) {
     try {
       if (req.method === "GET") {
         if (requestUrl.pathname === "/healthz") {
+          if (config.dockerSocketPath) {
+            try {
+              fs.statSync(config.dockerSocketPath);
+              return sendJson(res, 200, { status: "ok" });
+            } catch {
+              return sendJson(res, 503, { status: "unavailable" });
+            }
+          }
           const { body } = await dockerRequest(config, "/_ping");
           const healthy = body.toString("utf8").trim() === "OK";
           return sendJson(res, healthy ? 200 : 503, {
@@ -488,7 +548,10 @@ function startGateway() {
   server.keepAliveTimeout = 3_000;
   server.maxRequestsPerSocket = 100;
   server.listen(config.port, "0.0.0.0", () => {
-    gatewayLog("info", "gateway_started", { port: config.port });
+    gatewayLog("info", "gateway_started", {
+      port: config.port,
+      mode: config.dockerSocketPath ? "socket" : "proxy",
+    });
   });
 
   let stopping = false;
