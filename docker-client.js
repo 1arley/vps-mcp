@@ -102,10 +102,11 @@ function decodeExecStream(buffer) {
 
 function normalizeContainer(container, allowedContainers) {
   const allowed = allowedContainers instanceof Set ? allowedContainers : new Set(allowedContainers);
+  const wildcard = allowed.has("*");
   const names = Array.isArray(container.Names)
     ? container.Names.map((n) => String(n).replace(/^\//, ""))
     : [];
-  const name = names.find((n) => allowed.has(n));
+  const name = names.find((n) => wildcard || allowed.has(n));
   if (!name) return null;
   return {
     id: /^[a-f0-9]{64}$/i.test(container.Id || "") ? container.Id : null,
