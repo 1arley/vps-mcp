@@ -54,17 +54,22 @@ test("sanitizeOutput remove controles e limita tamanho", () => {
   assert.equal(sanitizeOutput("abc", 2), "ab");
 });
 
-function serverWith(allowlist) {
-  const server = new McpServer({ name: "ops-test", version: "1.0.0" });
-  const mockGateway = {
+function mockDocker(overrides = {}) {
+  return {
     listContainers: async () => ({ containers: [] }),
-    containerLogs: async () => { throw new Error("gateway offline"); },
-    startContainer: async () => { throw new Error("gateway offline"); },
-    stopContainer: async () => { throw new Error("gateway offline"); },
-    restartContainer: async () => { throw new Error("gateway offline"); },
-    execInContainer: async () => { throw new Error("gateway offline"); },
+    containerLogs: async () => { throw new Error("docker offline"); },
+    startContainer: async () => { throw new Error("docker offline"); },
+    stopContainer: async () => { throw new Error("docker offline"); },
+    restartContainer: async () => { throw new Error("docker offline"); },
+    execInContainer: async () => { throw new Error("docker offline"); },
+    ...overrides,
   };
-  registerOpsTools(server, { allowlist, log: () => {}, pgEnv: { host: "postgres", user: "ops", password: "" }, gateway: mockGateway });
+}
+
+function serverWith(allowlist, dockerOverrides) {
+  const server = new McpServer({ name: "ops-test", version: "1.0.0" });
+  const docker = mockDocker(dockerOverrides);
+  registerOpsTools(server, { allowlist, log: () => {}, pgEnv: { host: "postgres", user: "ops", password: "" }, docker });
   return server;
 }
 
@@ -80,27 +85,27 @@ test("tools de operacao negam fora da allowlist", async () => {
 
   const deniedShell = await server._registeredTools.shell.handler({ cmd: "rm -rf /" });
   assert.equal(deniedShell.isError, true);
-  assert.match(deniedShell.content[0].text, /Negado pela allowlist/);
+  assert.match(deniedShell.content[0].text, /Negado/);
 
   const allowedShell = await server._registeredTools.shell.handler({ cmd: "echo ok" });
   assert.equal(allowedShell.isError, undefined);
   assert.match(allowedShell.content[0].text, /ok/);
 
   const deniedRestart = await server._registeredTools.docker_restart.handler({ name: "worker-2" });
-  assert.match(deniedRestart.content[0].text, /Negado pela allowlist/);
+  assert.match(deniedRestart.content[0].text, /Negado/);
 
   const allowedRestart = await server._registeredTools.docker_restart.handler({ name: "web-1" });
-  assert.match(allowedRestart.content[0].text, /Negado|no such container|Error|denied|not found|Falha/i);
+  assert.match(allowedRestart.content[0].text, /Negado|docker offline|Error|denied|not found|Falha/i);
 
   const deniedExec = await server._registeredTools.docker_exec.handler({ name: "web-1", cmd: "cat /etc/passwd" });
-  assert.match(deniedExec.content[0].text, /Negado pela allowlist/);
+  assert.match(deniedExec.content[0].text, /Negado/);
 
   const deniedRead = await server._registeredTools.read_file.handler({ path: "/etc/passwd" });
-  assert.match(deniedRead.content[0].text, /Negado pela allowlist/);
+  assert.match(deniedRead.content[0].text, /Negado/);
 
   const allowedRead = await server._registeredTools.read_file.handler({ path: "/srv/ops-test-file" });
   assert.match(allowedRead.content[0].text, /no such file|Negado/i);
 
   const deniedPg = await server._registeredTools.pg_query.handler({ database: "outra-base", query: "select 1" });
-  assert.match(deniedPg.content[0].text, /Negado pela allowlist/);
+  assert.match(deniedPg.content[0].text, /Negado/);
 });

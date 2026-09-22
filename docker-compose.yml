@@ -1,48 +1,6 @@
 name: ${COMPOSE_PROJECT_NAME:-mcp}
 
 services:
-  docker-gateway:
-    image: ${GATEWAY_IMAGE:-vps-observer-gateway:local}
-    build:
-      context: .
-      target: gateway-runtime
-    pull_policy: ${PULL_POLICY:-missing}
-    restart: unless-stopped
-    environment:
-      NODE_ENV: production
-      SERVICE_NAME: ${GATEWAY_SERVICE_NAME:-docker-read-gateway}
-      GATEWAY_PORT: ${GATEWAY_PORT:-8080}
-      DOCKER_SOCKET_PATH: ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}
-      ALLOWED_CONTAINERS: ${ALLOWED_CONTAINERS:?ALLOWED_CONTAINERS is required}
-      ENABLE_DOCKER_LOGS: ${ENABLE_DOCKER_LOGS:-false}
-      MAX_LOG_BYTES: ${MAX_LOG_BYTES:-131072}
-      MAX_DOCKER_JSON_BYTES: ${MAX_DOCKER_JSON_BYTES:-1048576}
-      DOCKER_TIMEOUT_MS: ${DOCKER_TIMEOUT_MS:-8000}
-    expose:
-      - "${GATEWAY_PORT:-8080}"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - docker-observe
-    read_only: true
-    tmpfs:
-      - /tmp:rw,nosuid,nodev,noexec,size=8m
-    init: true
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_RAW
-    security_opt:
-      - no-new-privileges:true
-    pids_limit: ${GATEWAY_PIDS_LIMIT:-64}
-    mem_limit: ${GATEWAY_MEM_LIMIT:-128m}
-    cpus: ${GATEWAY_CPUS:-0.50}
-    logging:
-      driver: json-file
-      options:
-        max-size: ${LOG_MAX_SIZE:-10m}
-        max-file: "${LOG_MAX_FILE:-3}"
-
   mcp:
     image: ${MCP_IMAGE:-vps-observer-mcp:local}
     build:
@@ -57,24 +15,25 @@ services:
       AUTH_TOKEN_SHA256: ${AUTH_TOKEN_SHA256:?AUTH_TOKEN_SHA256 is required}
       MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-${MCP_DOMAIN:?MCP_DOMAIN is required}}
       MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
-      DOCKER_GATEWAY_URL: ${DOCKER_GATEWAY_URL:-http://docker-gateway:${GATEWAY_PORT:-8080}}
+      DOCKER_SOCKET_PATH: ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}
+      DOCKER_TIMEOUT_MS: ${DOCKER_TIMEOUT_MS:-8000}
+      MAX_DOCKER_BYTES: ${MAX_DOCKER_BYTES:-1048576}
+      OPS_ALLOWLIST_PATH: ${OPS_ALLOWLIST_PATH:-/app/ops-allowlist.json}
+      OPS_MAX_OUTPUT_BYTES: ${OPS_MAX_OUTPUT_BYTES:-1048576}
       TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-120}
       REQUEST_BODY_LIMIT: ${REQUEST_BODY_LIMIT:-64kb}
-      GATEWAY_TIMEOUT_MS: ${GATEWAY_TIMEOUT_MS:-10000}
-      MAX_GATEWAY_RESPONSE_BYTES: ${MAX_GATEWAY_RESPONSE_BYTES:-524288}
-      ENABLE_DOCKER_LOGS: ${ENABLE_DOCKER_LOGS:-false}
-      ENABLE_OPS_TOOLS: ${ENABLE_OPS_TOOLS:-false}
-      OPS_ALLOWLIST_PATH: ${OPS_ALLOWLIST_PATH:-/app/ops-allowlist.json}
-      OPS_MAX_OUTPUT_BYTES: ${OPS_MAX_OUTPUT_BYTES:-1048576}
+      PG_HOST: ${PG_HOST:-postgres}
+      PG_USER: ${PG_USER:-postgres}
+      PGPASSWORD: ${PGPASSWORD:-}
     expose:
       - "${MCP_PORT:-3000}"
     networks:
-      - docker-observe
       - web
-    depends_on:
-      docker-gateway:
-        condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./ops-allowlist.json:/app/ops-allowlist.json:ro
+      - /srv:/srv:ro
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=16m
@@ -111,8 +70,6 @@ services:
       traefik.http.middlewares.mcp-security-headers.headers.stsseconds: "${TRAEFIK_STS_SECONDS:-31536000}"
 
 networks:
-  docker-observe:
-    internal: true
   web:
     external: true
     name: ${TRAEFIK_NETWORK:-web}

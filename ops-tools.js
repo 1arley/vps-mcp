@@ -7,7 +7,6 @@ const path = require("node:path");
 const { z } = require("zod");
 
 const OPS_MAX_OUTPUT = Number(process.env.OPS_MAX_OUTPUT_BYTES) || 1024 * 1024;
-const SAFE_SHELL_FREE = /^[A-Za-z0-9 _./:=@%+,\-]+$/;
 
 function globToRegExp(glob) {
   let re = "";
@@ -17,29 +16,14 @@ function globToRegExp(glob) {
   while (i < length) {
     const char = source[i];
     if (char === "*") {
-      if (source[i + 1] === "*") {
-        re += ".*";
-        i += 2;
-      } else {
-        re += "[^/]*";
-        i += 1;
-      }
-    } else if (char === "?") {
-      re += "[^/]";
-      i += 1;
-    } else if (char === "[") {
+      if (source[i + 1] === "*") { re += ".*"; i += 2; }
+      else { re += "[^/]*"; i += 1; }
+    } else if (char === "?") { re += "[^/]"; i += 1; }
+    else if (char === "[") {
       const close = source.indexOf("]", i + 1);
-      if (close === -1) {
-        re += "\\[";
-        i += 1;
-      } else {
-        re += source.slice(i + 1, close);
-        i = close + 1;
-      }
-    } else {
-      re += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      i += 1;
-    }
+      if (close === -1) { re += "\\["; i += 1; }
+      else { re += source.slice(i + 1, close); i = close + 1; }
+    } else { re += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); i += 1; }
   }
   return new RegExp(`^${re}$`);
 }
@@ -47,18 +31,15 @@ function globToRegExp(glob) {
 function isAllowed(patterns, value) {
   if (!Array.isArray(patterns) || patterns.length === 0) return false;
   if (patterns.includes("*")) return true;
-  return patterns.some((pattern) => globToRegExp(pattern).test(String(value)));
+  return patterns.some((p) => globToRegExp(p).test(String(value)));
 }
 
 function execRuleMatches(rules, name, command) {
   if (!Array.isArray(rules) || rules.length === 0) return false;
   return rules.some(
-    (rule) =>
-      rule &&
-      typeof rule.name === "string" &&
-      globToRegExp(rule.name).test(String(name)) &&
-      typeof rule.command === "string" &&
-      globToRegExp(rule.command).test(String(command)),
+    (r) =>
+      r && typeof r.name === "string" && globToRegExp(r.name).test(String(name)) &&
+      typeof r.command === "string" && globToRegExp(r.command).test(String(command)),
   );
 }
 
@@ -81,24 +62,11 @@ function runCommand(cmd, { cwd, timeout = 120000, maxOutput = OPS_MAX_OUTPUT } =
     let stdout = "";
     let stderr = "";
     let killed = false;
-    const timer = setTimeout(() => {
-      killed = true;
-      child.kill("SIGKILL");
-    }, timeout);
-    child.stdout.on("data", (chunk) => {
-      stdout = appendCapped(stdout, chunk.toString("utf8"), maxOutput);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr = appendCapped(stderr, chunk.toString("utf8"), maxOutput);
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      resolve({ stdout, stderr, code: -1, killed, error: error.message });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ stdout, stderr, code, killed, error: undefined });
-    });
+    const timer = setTimeout(() => { killed = true; child.kill("SIGKILL"); }, timeout);
+    child.stdout.on("data", (chunk) => { stdout = appendCapped(stdout, chunk.toString("utf8"), maxOutput); });
+    child.stderr.on("data", (chunk) => { stderr = appendCapped(stderr, chunk.toString("utf8"), maxOutput); });
+    child.on("error", (error) => { clearTimeout(timer); resolve({ stdout, stderr, code: -1, killed, error: error.message }); });
+    child.on("close", (code) => { clearTimeout(timer); resolve({ stdout, stderr, code, killed, error: undefined }); });
   });
 }
 
@@ -108,8 +76,8 @@ function textResult(text, isError = false) {
   return result;
 }
 
-function denied(what) {
-  return textResult(`Negado pela allowlist: ${what}`, true);
+function denied(tool, detail) {
+  return textResult(`Negado: ${detail}.\nAdicione ao ops-allowlist.json e reinicie o MCP.`, true);
 }
 
 function loadOpsAllowlist(filePath) {
@@ -136,41 +104,36 @@ function loadOpsAllowlist(filePath) {
 
 function formatContainersTable(containers) {
   const header = "NAMES\tSTATUS\tIMAGE";
-  const body = containers.map(
-    (c) => `${c.name}\t${c.status}\t${c.image}`,
-  );
+  const body = containers.map((c) => `${c.name}\t${c.status}\t${c.image}`);
   return header + (body.length ? "\n" + body.join("\n") : "\n(sem containers)");
 }
+
+function containerAllowedInError(name, allowed) {
+  if (allowed.includes("*")) return `container "${name}" (allowlist: * — todos permitidos)`;
+  return `container "${name}" não está em docker.containers. Permitidos: [${allowed.join(", ")}]`;
+}
+
+const SAFE_SHELL_FREE = /^[A-Za-z0-9 _./:=@%+,\-]+$/;
 
 function registerOpsTools(server, deps) {
   const allowlist = deps.allowlist;
   const log = deps.log || (() => {});
   const pg = deps.pgEnv || { host: "postgres", user: "postgres", password: "" };
-  const gateway = deps.gateway;
-  const opsAnnotations = {
-    readOnlyHint: false,
-    destructiveHint: true,
-    idempotentHint: false,
-    openWorldHint: true,
-  };
-  const readOnlyAnnotations = {
-    readOnlyHint: true,
-    destructiveHint: false,
-    idempotentHint: true,
-    openWorldHint: false,
-  };
+  const docker = deps.docker;
+  const allowedContainers = allowlist.docker.containers;
+  const opsAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
+  const readOnlyAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 
   server.registerTool(
     "shell",
     {
       title: "Executar comando shell na VPS",
-      description:
-        "Executa um comando shell arbitrário no runtime do MCP. O comando inteiro precisa casar com um padrão da allowlist.",
+      description: "Executa um comando shell arbitrário. O comando precisa casar com um padrão de shell.patterns no ops-allowlist.json.",
       inputSchema: { cmd: z.string().min(1).max(8192) },
       annotations: opsAnnotations,
     },
     async ({ cmd }) => {
-      if (!isAllowed(allowlist.shell.patterns, cmd)) return denied("shell");
+      if (!isAllowed(allowlist.shell.patterns, cmd)) return denied("shell", `comando não permitido. Patterns: [${allowlist.shell.patterns.join(", ")}]`);
       log("info", "ops_shell", { cmd: sanitizeOutput(cmd, 256) });
       const result = await runCommand(cmd);
       return textResult(
@@ -183,66 +146,41 @@ function registerOpsTools(server, deps) {
     "docker_ps",
     {
       title: "Lista containers Docker",
-      description: "Lista containers Docker, filtrando apenas os nomes permitidos pela allowlist.",
+      description: "Lista containers Docker filtrados por docker.containers no ops-allowlist.json.",
       inputSchema: {},
       annotations: readOnlyAnnotations,
     },
     async () => {
       try {
-        const result = await gateway.listContainers();
-        const containers = result.containers || [];
-        const allowed = containers.filter((c) => isAllowed(allowlist.docker.containers, c.name));
-        return textResult(formatContainersTable(allowed));
+        const result = await docker.listContainers({ allowedContainers });
+        return textResult(formatContainersTable(result.containers));
       } catch (error) {
         log("error", "ops_docker_ps_error", { kind: error.constructor.name });
-        return textResult("Falha ao listar containers via gateway.", true);
-      }
-    },
-  );
-
-  server.registerTool(
-    "docker_logs",
-    {
-      title: "Logs de um container",
-      description: "Logs de um container permitido pela allowlist.",
-      inputSchema: {
-        name: z.string().min(1).max(128).regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/),
-        tail: z.number().int().min(1).max(1000).default(100),
-      },
-      annotations: readOnlyAnnotations,
-    },
-    async ({ name, tail = 100 }) => {
-      if (!isAllowed(allowlist.docker.containers, name)) return denied("docker_logs");
-      try {
-        const result = await gateway.containerLogs(name, tail);
-        return textResult(result.logs || "");
-      } catch (error) {
-        log("error", "ops_docker_logs_error", { container: name, kind: error.constructor.name });
-        return textResult(`Falha ao obter logs do container "${name}".`, true);
+        return textResult(`Falha ao listar containers: ${error.message}`, true);
       }
     },
   );
 
   for (const action of ["docker_restart", "docker_start", "docker_stop"]) {
-    const dockerVerb = action.replace("docker_", "");
+    const verb = action.replace("docker_", "");
     server.registerTool(
       action,
       {
-        title: `${dockerVerb.charAt(0).toUpperCase() + dockerVerb.slice(1)} container`,
-        description: `Executa \`docker ${dockerVerb}\` em um container permitido pela allowlist.`,
+        title: `${verb.charAt(0).toUpperCase() + verb.slice(1)} container`,
+        description: `Executa \`${verb}\` em um container. Container precisa estar em docker.containers.`,
         inputSchema: { name: z.string().min(1).max(128).regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/) },
         annotations: opsAnnotations,
       },
       async ({ name }) => {
-        if (!isAllowed(allowlist.docker.containers, name)) return denied(action);
+        if (!isAllowed(allowedContainers, name)) return denied(action, containerAllowedInError(name, allowedContainers));
         try {
-          if (action === "docker_restart") await gateway.restartContainer(name);
-          else if (action === "docker_start") await gateway.startContainer(name);
-          else if (action === "docker_stop") await gateway.stopContainer(name);
-          return textResult(`OK: ${dockerVerb} ${name}`);
+          if (action === "docker_restart") await docker.restartContainer(name, { allowedContainers });
+          else if (action === "docker_start") await docker.startContainer(name, { allowedContainers });
+          else if (action === "docker_stop") await docker.stopContainer(name, { allowedContainers });
+          return textResult(`OK: ${verb} ${name}`);
         } catch (error) {
           log("error", `ops_${action}_error`, { container: name, kind: error.constructor.name });
-          return textResult(`Falha ao executar ${dockerVerb} no container "${name}".`, true);
+          return textResult(`Falha ao ${verb} "${name}": ${error.message}`, true);
         }
       },
     );
@@ -252,8 +190,7 @@ function registerOpsTools(server, deps) {
     "docker_exec",
     {
       title: "Executa comando dentro de container",
-      description:
-        "Executa um comando dentro de um container. Container e comando precisam casar com as regras da allowlist.",
+      description: "Executa um comando dentro de um container. Container e comando precisam casar com docker.exec no ops-allowlist.json.",
       inputSchema: {
         name: z.string().min(1).max(128).regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/),
         cmd: z.string().min(1).max(4096),
@@ -261,14 +198,16 @@ function registerOpsTools(server, deps) {
       annotations: opsAnnotations,
     },
     async ({ name, cmd }) => {
-      if (!execRuleMatches(allowlist.docker.exec, name, cmd)) return denied("docker_exec");
+      if (!execRuleMatches(allowlist.docker.exec, name, cmd)) {
+        return denied("docker_exec", `container "${name}" + comando não permitidos. Rules: ${JSON.stringify(allowlist.docker.exec)}`);
+      }
       log("info", "ops_docker_exec", { container: name, cmd: sanitizeOutput(cmd, 256) });
       try {
-        const result = await gateway.execInContainer(name, cmd);
+        const result = await docker.execInContainer(name, cmd, { allowedContainers });
         return textResult(result.output || "");
       } catch (error) {
         log("error", "ops_docker_exec_error", { container: name, kind: error.constructor.name });
-        return textResult(`Falha ao executar comando no container "${name}".`, true);
+        return textResult(`Falha ao executar em "${name}": ${error.message}`, true);
       }
     },
   );
@@ -277,12 +216,14 @@ function registerOpsTools(server, deps) {
     "read_file",
     {
       title: "Lê arquivo",
-      description: "Lê um arquivo cujo caminho case com a allowlist de leitura.",
+      description: "Lê um arquivo cujo caminho casa com files.read no ops-allowlist.json.",
       inputSchema: { path: z.string().min(1).max(2048) },
       annotations: readOnlyAnnotations,
     },
     async ({ path: filePath }) => {
-      if (!isAllowed(allowlist.files.read, filePath)) return denied("read_file");
+      if (!isAllowed(allowlist.files.read, filePath)) {
+        return denied("read_file", `caminho "${filePath}" não permitido. Patterns: [${allowlist.files.read.join(", ")}]`);
+      }
       try {
         const content = await fsPromises.readFile(filePath, "utf8");
         return textResult(sanitizeOutput(content, 512 * 1024));
@@ -296,12 +237,14 @@ function registerOpsTools(server, deps) {
     "write_file",
     {
       title: "Escreve arquivo",
-      description: "Escreve um arquivo cujo caminho case com a allowlist de escrita.",
+      description: "Escreve um arquivo cujo caminho casa com files.write no ops-allowlist.json.",
       inputSchema: { path: z.string().min(1).max(2048), content: z.string().max(1024 * 1024) },
       annotations: opsAnnotations,
     },
     async ({ path: filePath, content }) => {
-      if (!isAllowed(allowlist.files.write, filePath)) return denied("write_file");
+      if (!isAllowed(allowlist.files.write, filePath)) {
+        return denied("write_file", `caminho "${filePath}" não permitido. Patterns: [${allowlist.files.write.join(", ")}]`);
+      }
       try {
         await fsPromises.mkdir(path.dirname(filePath), { recursive: true });
         await fsPromises.writeFile(filePath, content, "utf8");
@@ -316,12 +259,14 @@ function registerOpsTools(server, deps) {
     "list_dir",
     {
       title: "Lista diretório",
-      description: "Lista um diretório cujo caminho case com a allowlist de listagem.",
+      description: "Lista um diretório cujo caminho casa com files.list no ops-allowlist.json.",
       inputSchema: { path: z.string().min(1).max(2048) },
       annotations: readOnlyAnnotations,
     },
     async ({ path: dirPath }) => {
-      if (!isAllowed(allowlist.files.list, dirPath)) return denied("list_dir");
+      if (!isAllowed(allowlist.files.list, dirPath)) {
+        return denied("list_dir", `caminho "${dirPath}" não permitido. Patterns: [${allowlist.files.list.join(", ")}]`);
+      }
       try {
         const items = await fsPromises.readdir(dirPath, { withFileTypes: true });
         const lines = items.map((item) => `${item.isDirectory() ? "d" : "-"} ${item.name}`);
@@ -346,16 +291,14 @@ function registerOpsTools(server, deps) {
       sections.push(`=== OS ===\n${osResult.stdout.trim()}`);
       const disk = await runCommand("df -h 2>&1", { timeout: 10000 });
       sections.push(`=== DISK ===\n${disk.stdout.trim()}`);
-      const mem = await runCommand("grep -E 'MemTotal|MemFree|MemAvailable' /proc/meminfo 2>&1", {
-        timeout: 10000,
-      });
+      const mem = await runCommand("grep -E 'MemTotal|MemFree|MemAvailable' /proc/meminfo 2>&1", { timeout: 10000 });
       sections.push(`=== MEM ===\n${mem.stdout.trim()}`);
       const cpu = await runCommand("nproc 2>&1", { timeout: 10000 });
       sections.push(`=== CPU ===\n${cpu.stdout.trim()}`);
       const uptime = await runCommand("cat /proc/uptime 2>&1", { timeout: 10000 });
       sections.push(`=== UPTIME ===\n${uptime.stdout.trim()}`);
-      const docker = await runCommand("docker info 2>&1 | head -15", { timeout: 15000 });
-      sections.push(`=== DOCKER ===\n${docker.stdout.trim()}`);
+      const dockerInfo = await runCommand("docker info 2>&1 | head -15", { timeout: 15000 });
+      sections.push(`=== DOCKER ===\n${dockerInfo.stdout.trim()}`);
       return textResult(sections.join("\n\n"));
     },
   );
@@ -364,44 +307,22 @@ function registerOpsTools(server, deps) {
     "pg_query",
     {
       title: "Executa query SQL no Postgres",
-      description:
-        "Executa uma query SQL. Host e banco precisam estar na allowlist; query não é validada (confie no operador).",
+      description: "Executa uma query SQL. Host e banco precisam estar em pg.hosts e pg.databases do ops-allowlist.json.",
       inputSchema: { database: z.string().min(1).max(128), query: z.string().min(1).max(65536) },
       annotations: opsAnnotations,
     },
     async ({ database, query }) => {
-      if (!isAllowed(allowlist.pg.databases, database)) return denied("pg_query");
-      if (!isAllowed(allowlist.pg.hosts, pg.host)) return denied("pg_query");
+      if (!isAllowed(allowlist.pg.databases, database)) {
+        return denied("pg_query", `database "${database}" não permitido. Patterns: [${allowlist.pg.databases.join(", ")}]`);
+      }
+      if (!isAllowed(allowlist.pg.hosts, pg.host)) {
+        return denied("pg_query", `host "${pg.host}" não permitido. Patterns: [${allowlist.pg.hosts.join(", ")}]`);
+      }
       log("info", "ops_pg_query", { database, query: sanitizeOutput(query, 256) });
-      const { stdout, stderr, code, error, killed } = await new Promise((resolve) => {
-        let out = "";
-        let err = "";
-        let killedFlag = false;
-        const timer = setTimeout(() => {
-          killedFlag = true;
-          psqlProcess.kill("SIGKILL");
-        }, 30000);
-        const psqlProcess = spawn("psql", ["-h", pg.host, "-U", pg.user, "-d", database, "-c", query], {
-          env: { ...process.env, PGPASSWORD: pg.password, PGCLIENTENCODING: "UTF8" },
-        });
-        psqlProcess.stdout.on("data", (chunk) => {
-          out = appendCapped(out, chunk.toString("utf8"), OPS_MAX_OUTPUT);
-        });
-        psqlProcess.stderr.on("data", (chunk) => {
-          err = appendCapped(err, chunk.toString("utf8"), OPS_MAX_OUTPUT);
-        });
-        psqlProcess.on("error", (errObject) => {
-          clearTimeout(timer);
-          resolve({ stdout: out, stderr: err, code: -1, error: errObject.message, killed: killedFlag });
-        });
-        psqlProcess.on("close", (exitCode) => {
-          clearTimeout(timer);
-          resolve({ stdout: out, stderr: err, code: exitCode, killed: killedFlag });
-        });
-      });
+      const { stdout, stderr, code, error, killed } = await runPsql(pg, database, query);
       if (error) return textResult(`psql indisponível: ${error}`, true);
-      if (code === 0) return textResult(out);
-      return textResult(sanitizeOutput(out + (stderr ? "\n" + stderr : "")), true);
+      if (code === 0) return textResult(stdout);
+      return textResult(sanitizeOutput(stdout + (stderr ? "\n" + stderr : "")), true);
     },
   );
 
@@ -409,12 +330,14 @@ function registerOpsTools(server, deps) {
     "deploy",
     {
       title: "Git pull + restart de serviço",
-      description: "Executa \`git pull\` e uma ação no diretório permitido. Ação com caracteres simples.",
+      description: "Executa `git pull` e uma ação no diretório. Diretório precisa estar em deploy.dirs do ops-allowlist.json.",
       inputSchema: { dir: z.string().min(1).max(512), action: z.string().min(1).max(512) },
       annotations: opsAnnotations,
     },
     async ({ dir, action }) => {
-      if (!isAllowed(allowlist.deploy.dirs, dir)) return denied("deploy");
+      if (!isAllowed(allowlist.deploy.dirs, dir)) {
+        return denied("deploy", `diretório "${dir}" não permitido. Patterns: [${allowlist.deploy.dirs.join(", ")}]`);
+      }
       if (!SAFE_SHELL_FREE.test(action)) {
         return textResult("Ação do deploy contém caracteres proibidos.", true);
       }
@@ -428,6 +351,22 @@ function registerOpsTools(server, deps) {
       return textResult(pieces.join("\n"));
     },
   );
+}
+
+function runPsql(pg, database, query) {
+  return new Promise((resolve) => {
+    let out = "";
+    let err = "";
+    let killedFlag = false;
+    const timer = setTimeout(() => { killedFlag = true; proc.kill("SIGKILL"); }, 30000);
+    const proc = spawn("psql", ["-h", pg.host, "-U", pg.user, "-d", database, "-c", query], {
+      env: { ...process.env, PGPASSWORD: pg.password, PGCLIENTENCODING: "UTF8" },
+    });
+    proc.stdout.on("data", (chunk) => { out = appendCapped(out, chunk.toString("utf8"), OPS_MAX_OUTPUT); });
+    proc.stderr.on("data", (chunk) => { err = appendCapped(err, chunk.toString("utf8"), OPS_MAX_OUTPUT); });
+    proc.on("error", (e) => { clearTimeout(timer); resolve({ stdout: out, stderr: err, code: -1, error: e.message, killed: killedFlag }); });
+    proc.on("close", (code) => { clearTimeout(timer); resolve({ stdout: out, stderr: err, code, killed: killedFlag, error: undefined }); });
+  });
 }
 
 module.exports = {

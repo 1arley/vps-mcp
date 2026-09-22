@@ -73,6 +73,23 @@ function request(port, options = {}) {
   });
 }
 
+function mockDocker(overrides = {}) {
+  return {
+    listContainers: async () => ({ containers: [] }),
+    containerLogs: async () => ({ container: "app", logs: "ok", truncated: false }),
+    ...overrides,
+  };
+}
+
+const defaultAllowlist = {
+  shell: { patterns: ["*"] },
+  docker: { containers: ["*"], exec: [{ name: "*", command: "*" }] },
+  files: { read: ["*"], write: ["/srv/**"], list: ["*"] },
+  pg: { hosts: ["*"], databases: ["*"] },
+  compose: { dirs: ["/srv/**"] },
+  deploy: { dirs: ["/srv/**"] },
+};
+
 test("configuracao falha fechada para segredo em texto puro e hosts ausentes", () => {
   assert.throws(
     () => loadConfig({ AUTH_TOKEN: TOKEN, MCP_ALLOWED_HOSTS: "mcp.example.test" }),
@@ -98,23 +115,21 @@ test("sanitizacao remove controles e mascara formatos comuns de segredo", () => 
   assert.match(sanitized, /\[REDACTED\]/);
 });
 
-test("logs Docker permanecem fora da superficie MCP por padrao", () => {
-  const gateway = {};
-  const secureDefault = createMcpServer(gateway, { enableDockerLogs: false });
-  const explicitOptIn = createMcpServer(gateway, { enableDockerLogs: true });
-  assert.deepEqual(Object.keys(secureDefault._registeredTools), [
-    "docker_containers",
-    "runtime_info",
-  ]);
-  assert.equal("docker_logs" in explicitOptIn._registeredTools, true);
+test("tools sempre incluem docker_containers, docker_logs, runtime_info e ops tools", () => {
+  const docker = mockDocker();
+  const server = createMcpServer(docker, defaultAllowlist);
+  const tools = Object.keys(server._registeredTools);
+  assert.ok(tools.includes("docker_containers"));
+  assert.ok(tools.includes("docker_logs"));
+  assert.ok(tools.includes("runtime_info"));
+  assert.ok(tools.includes("shell"));
+  assert.ok(tools.includes("docker_exec"));
+  assert.ok(tools.includes("read_file"));
 });
 
 test("fronteiras HTTP validam host, origin e bearer antes do MCP", async (t) => {
-  const gateway = {
-    listContainers: async () => ({ containers: [] }),
-    containerLogs: async () => ({ container: "app", logs: "ok", truncated: false }),
-  };
-  const app = createApp(loadConfig(validEnvironment()), { gateway });
+  const docker = mockDocker();
+  const app = createApp(loadConfig(validEnvironment()), { docker, allowlist: defaultAllowlist });
   const server = http.createServer(app);
   const port = await listen(server);
   t.after(() => close(server));
@@ -175,11 +190,8 @@ test("fronteiras HTTP validam host, origin e bearer antes do MCP", async (t) => 
 });
 
 test("endpoint MCP completa o handshake stateless autenticado", async (t) => {
-  const gateway = {
-    listContainers: async () => ({ containers: [] }),
-    containerLogs: async () => ({ container: "app", logs: "ok", truncated: false }),
-  };
-  const app = createApp(loadConfig(validEnvironment()), { gateway });
+  const docker = mockDocker();
+  const app = createApp(loadConfig(validEnvironment()), { docker, allowlist: defaultAllowlist });
   const server = http.createServer(app);
   const port = await listen(server);
   t.after(() => close(server));

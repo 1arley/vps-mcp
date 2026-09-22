@@ -6,3 +6,4 @@ coverage/
 *.log
 *.pid
 .DS_Store
+ai-memory.db*
