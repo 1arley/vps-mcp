@@ -45,7 +45,7 @@ Pré-requisitos: Docker com Compose e uma rede externa `web` já usada pelo Trae
 
    - `AUTH_TOKEN_SHA256`: apenas os 64 caracteres hexadecimais do hash;
    - `MCP_DOMAIN`: domínio exato servido pelo Traefik;
-   - `ops-allowlist.json`: embutido na imagem no build; libere containers, comandos e caminhos editando o arquivo no repositório (push → CI → `docker compose pull`);
+   - `ops-allowlist.json`: embutido na imagem no build (padrão liberado, `*`); para limitar as permissões na VPS monte seu próprio arquivo por cima — veja [Restringir permissões na VPS](#restringir-permissões-na-vps-opcional);
    - `MCP_ALLOWED_ORIGINS`: vazio para rejeitar todos os Origins, ou Origins HTTPS exatos para clientes web.
 
 4. Valide, autentique no GHCR e suba:
@@ -77,6 +77,69 @@ aponte `MCP_IMAGE=vps-observer-mcp:local` no `.env`.
 O endpoint remoto é `https://SEU_DOMINIO/mcp` e cada chamada deve enviar `Authorization: Bearer SEU_TOKEN`. O Traefik publica somente `/mcp`; os healthchecks ficam internos.
 
 Para releases imutáveis, fixe em `.env` a referência por digest gerada após o pipeline, por exemplo `MCP_IMAGE=ghcr.io/1arley/vps-mcp@sha256:...` (o workflow publica tags por SHA e `latest`, com SBOM e proveniência).
+
+## Restringir permissões na VPS (opcional)
+
+A allowlist embutida na imagem (`ops-allowlist.json`) é propositalmente liberada
+(`"*"` em shell, docker, files e pg) — feita para um único operador que confia na
+própria VPS. Se você quiser limitar o que o MCP pode fazer, **não é preciso
+rebuildar a imagem**: monte seu próprio arquivo por cima do embutido.
+
+1. Crie o arquivo ao lado do Compose:
+
+   `/opt/vps-mcp/ops-allowlist.json`
+
+   ```json
+   {
+     "shell": { "patterns": ["docker ps*", "docker logs*"] },
+     "docker": {
+       "containers": ["meu-app", "postgres-1"],
+       "exec": [{ "name": "postgres-1", "command": "pg_isready*" }]
+     },
+     "files": { "read": ["/srv/**"], "write": [], "list": ["/srv"] },
+     "pg": { "hosts": ["postgres"], "databases": ["app"] },
+     "compose": { "dirs": ["/srv/meu-projeto"] },
+     "deploy": { "dirs": ["/srv/meu-projeto"] }
+   }
+   ```
+
+2. Monte no serviço `mcp` do `docker-compose.yml` (o caminho precisa ser o de
+   `OPS_ALLOWLIST_PATH`, default `/app/ops-allowlist.json`):
+
+   ```yaml
+   services:
+     mcp:
+       volumes:
+         - /var/run/docker.sock:/var/run/docker.sock:ro
+         - ./ops-allowlist.json:/app/ops-allowlist.json:ro
+         - /srv:/srv:ro
+   ```
+
+3. Recrie o serviço e pronto:
+
+   ```bash
+   docker compose up -d
+   ```
+
+   Depois disso, editar o arquivo exige só `docker compose restart mcp` — a
+   allowlist é lida uma vez na subida do processo.
+
+Semântica de cada chave (glob simples com `*`):
+
+| Chave | O que libera |
+| --- | --- |
+| `shell.patterns` | comandos bash passados à tool `shell` |
+| `docker.containers` | containers visíveis em `docker_containers`, `docker_ps` e `docker_logs`, e alvos de `docker_start` / `docker_stop` / `docker_restart` |
+| `docker.exec` | regras `{ "name", "command" }` para `docker_exec` (ambos glob) |
+| `files.read` / `files.write` / `files.list` | caminhos de `read_file` / `write_file` / `list_dir` |
+| `pg.hosts` / `pg.databases` | destinos de `pg_query` |
+| `deploy.dirs` | diretórios do `deploy` (`git pull` + ação) |
+| `compose.dirs` | reservado — carregado, mas ainda sem tool correspondente |
+
+Tudo é **negado por padrão**: chave ausente ou array vazio nega; `"*"` libera tudo;
+qualquer permissão nova negada pelo servidor vem com o texto `Adicione ao
+ops-allowlist.json e reinicie o MCP`. Com o volume montado a VPS passa a ter 3
+arquivos (`docker-compose.yml`, `.env` e `ops-allowlist.json`).
 
 ## Rotação do token
 
