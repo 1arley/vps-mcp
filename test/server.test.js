@@ -86,7 +86,6 @@ const defaultAllowlist = {
   docker: { containers: ["*"], exec: [{ name: "*", command: "*" }] },
   files: { read: ["*"], write: ["/srv/**"], list: ["*"] },
   pg: { hosts: ["*"], databases: ["*"] },
-  compose: { dirs: ["/srv/**"] },
   deploy: { dirs: ["/srv/**"] },
 };
 

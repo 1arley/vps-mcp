@@ -79,7 +79,6 @@ test("tools de operacao negam fora da allowlist", async () => {
     docker: { containers: ["web-1"], exec: [] },
     files: { read: ["/srv/**"], write: [], list: [] },
     pg: { hosts: ["postgres"], databases: ["vpsdb"] },
-    compose: { dirs: ["/srv/**"] },
     deploy: { dirs: [] },
   });
 

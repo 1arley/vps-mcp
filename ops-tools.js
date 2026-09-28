@@ -97,7 +97,6 @@ function loadOpsAllowlist(filePath) {
       hosts: Array.isArray(parsed.pg?.hosts) ? parsed.pg.hosts : [],
       databases: Array.isArray(parsed.pg?.databases) ? parsed.pg.databases : [],
     },
-    compose: { dirs: Array.isArray(parsed.compose?.dirs) ? parsed.compose.dirs : [] },
     deploy: { dirs: Array.isArray(parsed.deploy?.dirs) ? parsed.deploy.dirs : [] },
   };
 }

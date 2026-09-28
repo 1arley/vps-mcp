@@ -9,5 +9,4 @@ coverage
 README.md
 SECURITY.md
 docker-compose.yml
-docker-compose.ops.yml
 npm-debug.log*

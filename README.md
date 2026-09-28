@@ -1,29 +1,46 @@
 # VPS Observer MCP
 
-MCP remoto e somente leitura para observar containers Docker explicitamente autorizados. O desenho prioriza redução de privilégio: o processo exposto à rede não recebe shell, filesystem da VPS, credenciais de banco nem acesso ao socket Docker.
+MCP remoto para observar e operar containers Docker autorizados. O servidor fica atrás do Traefik com autenticação por bearer, checagem de Host/Origin e rate limit. Não há gateway nem proxy intermediário: o MCP fala direto com a API do Docker pelo socket montado somente leitura, e **cada ferramenta é governada pelo `ops-allowlist.json`**, que decide o que é permitido.
 
-> Segurança absoluta não pode ser garantida por nenhum projeto. Esta versão elimina as falhas críticas identificadas, adota defaults fechados e registra em [SECURITY.md](SECURITY.md) as premissas e os riscos residuais que precisam ser operados.
+> Segurança absoluta não pode ser garantida por nenhum projeto. Esta versão registra em [SECURITY.md](SECURITY.md) as premissas, os controles aplicados e os riscos residuais que precisam ser operados.
 
 ## Arquitetura
 
 ```mermaid
 flowchart LR
     C[Cliente MCP] -->|HTTPS + Bearer| T[Traefik]
-    T -->|rede web| M[MCP não-root<br/>somente leitura]
-    M -->|API interna restrita| G[Gateway com allowlist]
-    G -->|rede docker-raw isolada| P[Proxy Docker<br/>somente GET/HEAD]
-    P -->|socket local| D[Docker Engine]
+    T -->|rede web| M[MCP<br/>rootfs read-only, cap_drop ALL]
+    M -->|API HTTP via socket :ro| D[Docker Engine]
+    M -->|/srv montado :ro| S[Arquivos de deploy]
 ```
 
-As redes `docker-observe` e `docker-raw` são internas e distintas. O MCP não consegue alcançar o proxy do socket. O gateway só oferece listagem filtrada e, quando habilitado explicitamente, logs limitados. O proxy bloqueia todos os métodos mutáveis mesmo se o gateway for comprometido.
+O `docker-compose.yml` concentra a contenção: rootfs `read_only`, `cap_drop: ALL`,
+`no-new-privileges`, `pids_limit`/`mem_limit`/`cpus`, socket e `/srv` montados `:ro`
+e Traefik publicando somente `/mcp`. O mount `:ro` do socket protege o arquivo, não
+a API — a autorização real de cada operação vem da allowlist consultada pela tool.
 
 ## Ferramentas expostas
 
-- `docker_containers`: estado dos containers presentes em `ALLOWED_CONTAINERS`.
-- `runtime_info`: métricas não sensíveis do runtime isolado do MCP.
-- `docker_logs`: opt-in com `ENABLE_DOCKER_LOGS=true`; desativada por padrão porque logs podem conter segredos e prompt injection.
+Leitura (filtradas pela allowlist):
 
-Não existem ferramentas de shell, `docker exec`, start/stop/restart, deploy, escrita/leitura arbitrária de arquivos ou SQL livre.
+- `docker_containers` / `docker_ps`: listagem de containers por `docker.containers`.
+- `docker_logs`: logs limitados de um container em `docker.containers` — conteúdo
+  marcado como não confiável (pode conter segredos ou prompt injection).
+- `read_file` / `list_dir`: caminhos em `files.read` / `files.list`.
+- `pg_query`: `pg.hosts` + `pg.databases`.
+- `runtime_info` / `system_info`: métricas do processo e da VPS, sem parâmetros.
+
+Operação (allowlist decide, e o padrão do repositório é `*`):
+
+- `shell`: comandos em `shell.patterns`.
+- `docker_exec`: `{ name, command }` em `docker.exec`.
+- `docker_start` / `docker_stop` / `docker_restart`: containers em `docker.containers`.
+- `write_file`: caminhos em `files.write`.
+- `deploy`: `git pull` + ação em `deploy.dirs`.
+
+Toda chave ausente ou array vazio **nega**. A allowlist padrão é liberada porque o
+modelo é operador único — para limitar, veja
+[Restringir permissões na VPS](#restringir-permissões-na-vps-opcional).
 
 ## Subida local/na VPS
 
@@ -48,19 +65,19 @@ Pré-requisitos: Docker com Compose e uma rede externa `web` já usada pelo Trae
    - `ops-allowlist.json`: embutido na imagem no build (padrão liberado, `*`); para limitar as permissões na VPS monte seu próprio arquivo por cima — veja [Restringir permissões na VPS](#restringir-permissões-na-vps-opcional);
    - `MCP_ALLOWED_ORIGINS`: vazio para rejeitar todos os Origins, ou Origins HTTPS exatos para clientes web.
 
-4. Valide, autentique no GHCR e suba:
+4. Valide e suba:
 
    ```bash
    docker compose config --quiet
-   printf '%s' 'SEU_PAT_READ_PACKAGES' | docker login ghcr.io -u SEU_USER --password-stdin
    docker compose pull
    docker compose up -d
    docker compose ps
    ```
 
-   O pacote `vps-mcp` no GHCR é privado por padrão; sem login o `pull` falha. Se preferir
-   pular o login, marque o pacote como público em
-   `https://github.com/users/SEU_USER/packages/container/vps-mcp`.
+   O pacote `vps-mcp` no GHCR é público, então o `pull` é anônimo — nenhum login
+   ou PAT é necessário. Para voltar a privar, marque o pacote como privado em
+   `https://github.com/users/1arley/packages/container/vps-mcp/settings` e faça
+   `docker login ghcr.io` na VPS com um PAT de `read:packages`.
 
 Na VPS de produção o diretório fica enxuto — só o Compose e o `.env`:
 
@@ -75,6 +92,48 @@ faz `docker compose pull`. Em desenvolvimento local, construa a imagem no host e
 aponte `MCP_IMAGE=vps-observer-mcp:local` no `.env`.
 
 O endpoint remoto é `https://SEU_DOMINIO/mcp` e cada chamada deve enviar `Authorization: Bearer SEU_TOKEN`. O Traefik publica somente `/mcp`; os healthchecks ficam internos.
+
+## Link para o agente MCP
+
+O que se entrega ao cliente/agente é exatamente esta URL + o bearer:
+
+```
+URL:        https://SEU_DOMINIO/mcp
+Header:     Authorization: Bearer SEU_TOKEN
+Transporte: streamable HTTP (sem SSE separado)
+```
+
+Config JSON típico de um cliente MCP remoto (`mcpServers`):
+
+```json
+{
+  "mcpServers": {
+    "vps-observer": {
+      "type": "http",
+      "url": "https://SEU_DOMINIO/mcp",
+      "headers": {
+        "Authorization": "Bearer SEU_TOKEN"
+      }
+    }
+  }
+}
+```
+
+Checklist de sanidade antes de entregar o link:
+
+```bash
+# sem token → 401
+curl -i https://SEU_DOMINIO/mcp
+# com token → 200/202 e handshake MCP
+curl -i -X POST https://SEU_DOMINIO/mcp \
+  -H 'Authorization: Bearer SEU_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1.0"}}}'
+```
+
+Hosts e Origins aceitos vêm de `MCP_ALLOWED_HOSTS` / `MCP_ALLOWED_ORIGINS` no `.env`;
+cliente nativo sem `Origin` é aceito, Origin errado é rejeitado antes do MCP.
 
 Para releases imutáveis, fixe em `.env` a referência por digest gerada após o pipeline, por exemplo `MCP_IMAGE=ghcr.io/1arley/vps-mcp@sha256:...` (o workflow publica tags por SHA e `latest`, com SBOM e proveniência).
 
@@ -98,7 +157,6 @@ rebuildar a imagem**: monte seu próprio arquivo por cima do embutido.
      },
      "files": { "read": ["/srv/**"], "write": [], "list": ["/srv"] },
      "pg": { "hosts": ["postgres"], "databases": ["app"] },
-     "compose": { "dirs": ["/srv/meu-projeto"] },
      "deploy": { "dirs": ["/srv/meu-projeto"] }
    }
    ```
@@ -134,7 +192,6 @@ Semântica de cada chave (glob simples com `*`):
 | `files.read` / `files.write` / `files.list` | caminhos de `read_file` / `write_file` / `list_dir` |
 | `pg.hosts` / `pg.databases` | destinos de `pg_query` |
 | `deploy.dirs` | diretórios do `deploy` (`git pull` + ação) |
-| `compose.dirs` | reservado — carregado, mas ainda sem tool correspondente |
 
 Tudo é **negado por padrão**: chave ausente ou array vazio nega; `"*"` libera tudo;
 qualquer permissão nova negada pelo servidor vem com o texto `Adicione ao
@@ -163,4 +220,11 @@ do GitHub e a imagem base Node estão fixadas por SHA/digest.
 
 ## Resumo para apresentação
 
-O ponto principal é a contenção de impacto. Antes, um único token liberava comandos arbitrários e o socket Docker, equivalentes a root na VPS. Agora o serviço externo é somente leitura, roda sem privilégios e atravessa duas barreiras internas: uma allowlist por container e um proxy que bloqueia mutações. Entradas, Host, Origin, autenticação, taxa, payloads, timeouts e outputs são limitados; dependências e imagens passam por verificação automatizada.
+O ponto principal é a contenção de impacto. O acesso externo é um único endpoint
+`/mcp` atrás do Traefik, com token de 256 bits, checagem de Host/Origin, rate limit
+e limites de body/output/logs. O container roda com rootfs read-only, sem
+capabilities, com limites de CPU/memória/PIDs, e **cada ferramenta passa pela
+allowlist** (`ops-allowlist.json`), que nega por padrão — o arquivo do repositório
+é o liberado (`*`), pensado para operador único e substituível por volume na VPS.
+No CI, `npm audit` e Trivy bloqueiam vulnerabilidades com correção disponível, e a
+imagem vai para o GHCR com SBOM e proveniência.

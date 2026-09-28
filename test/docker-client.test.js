@@ -1,24 +1,12 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const http = require("node:http");
 const test = require("node:test");
 
-const { DockerClient, decodeDockerLogBuffer, decodeExecStream, normalizeContainer } = require("../docker-client.js");
+const { decodeDockerLogBuffer, decodeExecStream, normalizeContainer } = require("../docker-client.js");
 
 const ALLOWED_ID = "a".repeat(64);
 const DENIED_ID = "b".repeat(64);
-
-function listen(server) {
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve(server.address().port));
-  });
-}
-
-function close(server) {
-  return new Promise((resolve) => server.close(resolve));
-}
 
 function dockerFrame(text, stream = 1) {
   const payload = Buffer.from(text);
@@ -56,28 +44,4 @@ test("normalizeContainer filtra por allowlist", () => {
     State: "running", Status: "Up 1 hour", Ports: [],
   }, allowed);
   assert.equal(n2, null);
-});
-
-test("DockerClient usa socket HTTP direto", async (t) => {
-  let requestedPath = "";
-  const fakeSocket = http.createServer((req, res) => {
-    requestedPath = req.url;
-    if (req.url === "/containers/json?all=1") {
-      res.setHeader("Content-Type", "application/json");
-      return res.end(JSON.stringify([
-        { Id: ALLOWED_ID, Names: ["/web-1"], Image: "app:1", State: "running", Status: "Up", Ports: [] },
-      ]));
-    }
-    res.statusCode = 404;
-    res.end();
-  });
-  const port = await listen(fakeSocket);
-  t.after(() => close(fakeSocket));
-
-  // DockerClient uses unix sockets, but we can test the HTTP path construction
-  // by verifying the method calls produce correct paths
-  const client = new DockerClient({ socketPath: `/tmp/test-${port}.sock`, timeoutMs: 2000 });
-  // Can't actually connect to a fake HTTP server via unix socket path
-  // but we can verify the normalization and decoder logic works
-  assert.ok(client);
 });
