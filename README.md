@@ -45,20 +45,38 @@ Pré-requisitos: Docker com Compose e uma rede externa `web` já usada pelo Trae
 
    - `AUTH_TOKEN_SHA256`: apenas os 64 caracteres hexadecimais do hash;
    - `MCP_DOMAIN`: domínio exato servido pelo Traefik;
-   - `ALLOWED_CONTAINERS`: nomes exatos obtidos com `docker ps --format '{{.Names}}'`;
+   - `ops-allowlist.json`: embutido na imagem no build; libere containers, comandos e caminhos editando o arquivo no repositório (push → CI → `docker compose pull`);
    - `MCP_ALLOWED_ORIGINS`: vazio para rejeitar todos os Origins, ou Origins HTTPS exatos para clientes web.
 
-4. Valide e inicie:
+4. Valide, autentique no GHCR e suba:
 
    ```bash
    docker compose config --quiet
-   docker compose up -d --build
+   printf '%s' 'SEU_PAT_READ_PACKAGES' | docker login ghcr.io -u SEU_USER --password-stdin
+   docker compose pull
+   docker compose up -d
    docker compose ps
    ```
 
+   O pacote `vps-mcp` no GHCR é privado por padrão; sem login o `pull` falha. Se preferir
+   pular o login, marque o pacote como público em
+   `https://github.com/users/SEU_USER/packages/container/vps-mcp`.
+
+Na VPS de produção o diretório fica enxuto — só o Compose e o `.env`:
+
+```
+/opt/vps-mcp/
+├── docker-compose.yml
+└── .env
+```
+
+O código vive no GitHub, o GitHub Actions constrói e publica a imagem e a VPS apenas
+faz `docker compose pull`. Em desenvolvimento local, construa a imagem no host e
+aponte `MCP_IMAGE=vps-observer-mcp:local` no `.env`.
+
 O endpoint remoto é `https://SEU_DOMINIO/mcp` e cada chamada deve enviar `Authorization: Bearer SEU_TOKEN`. O Traefik publica somente `/mcp`; os healthchecks ficam internos.
 
-Para produção, substitua as imagens locais em `.env` pelas referências imutáveis por digest geradas após o pipeline, por exemplo `ghcr.io/empresa/vps-mcp@sha256:...`.
+Para releases imutáveis, fixe em `.env` a referência por digest gerada após o pipeline, por exemplo `MCP_IMAGE=ghcr.io/1arley/vps-mcp@sha256:...` (o workflow publica tags por SHA e `latest`, com SBOM e proveniência).
 
 ## Rotação do token
 
@@ -73,10 +91,12 @@ npm run check
 npm test
 docker compose config --quiet
 docker build --target mcp-runtime -t vps-observer-mcp:test .
-docker build --target gateway-runtime -t vps-observer-gateway:test .
 ```
 
-O CI repete testes e auditoria, constrói as duas imagens, bloqueia vulnerabilidades altas/críticas e publica SBOM e proveniência. As ações do GitHub e a imagem do proxy Docker estão fixadas por SHA/digest.
+O CI repete testes e auditoria, constrói a imagem do MCP, bloqueia vulnerabilidades
+altas/críticas com correção disponível (as sem correção no base bookworm são
+ignoradas pelo gate) e publica a imagem no GHCR com SBOM e proveniência. As ações
+do GitHub e a imagem base Node estão fixadas por SHA/digest.
 
 ## Resumo para apresentação
 

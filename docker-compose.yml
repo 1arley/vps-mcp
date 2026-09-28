@@ -2,10 +2,7 @@ name: ${COMPOSE_PROJECT_NAME:-mcp}
 
 services:
   mcp:
-    image: ${MCP_IMAGE:-vps-observer-mcp:local}
-    build:
-      context: .
-      target: mcp-runtime
+    image: ${MCP_IMAGE:-ghcr.io/1arley/vps-mcp:latest}
     pull_policy: ${PULL_POLICY:-missing}
     restart: unless-stopped
     environment:
@@ -32,7 +29,6 @@ services:
       - web
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./ops-allowlist.json:/app/ops-allowlist.json:ro
       - /srv:/srv:ro
     read_only: true
     tmpfs:
