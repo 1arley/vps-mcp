@@ -79,17 +79,30 @@ Pré-requisitos: Docker com Compose e uma rede externa `web` já usada pelo Trae
    `https://github.com/users/1arley/packages/container/vps-mcp/settings` e faça
    `docker login ghcr.io` na VPS com um PAT de `read:packages`.
 
-Na VPS de produção o diretório fica enxuto — só o Compose e o `.env`:
+Na VPS de produção o diretório é um clone do repositório — o `.env` fica só na
+máquina e é ignorado pelo Git:
 
 ```
 /opt/vps-mcp/
 ├── docker-compose.yml
-└── .env
+├── .env.example
+├── .env                 # local, fora do Git
+└── ops-allowlist.json   # só se você montar o volume (ver seção abaixo)
 ```
 
-O código vive no GitHub, o GitHub Actions constrói e publica a imagem e a VPS apenas
-faz `docker compose pull`. Em desenvolvimento local, construa a imagem no host e
-aponte `MCP_IMAGE=vps-observer-mcp:local` no `.env`.
+O código vive no GitHub, o GitHub Actions constrói e publica a imagem; a VPS só
+sincroniza as duas coisas — repo (configuração) e imagem:
+
+```bash
+cd /opt/vps-mcp
+cp -n .env.example .env   # só na primeira vez; depois edite
+git pull                  # compose, allowlist, .env.example
+docker compose pull       # imagem nova do GHCR (pública, anônima)
+docker compose up -d
+```
+
+Em desenvolvimento local, construa a imagem no host e aponte
+`MCP_IMAGE=vps-observer-mcp:local` no `.env`.
 
 O endpoint remoto é `https://SEU_DOMINIO/mcp` e cada chamada deve enviar `Authorization: Bearer SEU_TOKEN`. O Traefik publica somente `/mcp`; os healthchecks ficam internos.
 
