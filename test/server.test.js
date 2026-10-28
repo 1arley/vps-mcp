@@ -11,7 +11,7 @@ const {
   createMcpServer,
   loadConfig,
   sanitizeUntrustedText,
-} = require("../server.js");
+} = require("../dist/server.js");
 
 const TOKEN = "test-token-with-at-least-thirty-two-random-characters-123456";
 const TOKEN_HASH = crypto.createHash("sha256").update(TOKEN).digest("hex");

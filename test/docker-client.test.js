@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { decodeDockerLogBuffer, decodeExecStream, normalizeContainer } = require("../docker-client.js");
+const { decodeDockerLogBuffer, decodeExecStream, normalizeContainer } = require("../dist/docker-client.js");
 
 const ALLOWED_ID = "a".repeat(64);
 const DENIED_ID = "b".repeat(64);

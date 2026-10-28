@@ -10,7 +10,7 @@ const {
   loadOpsAllowlist,
   registerOpsTools,
   sanitizeOutput,
-} = require("../ops-tools.js");
+} = require("../dist/ops-tools.js");
 
 test("globToRegExp casa padroes com * e **", () => {
   assert.equal(globToRegExp("*").test("qualquercoisa"), true);
