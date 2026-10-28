@@ -218,10 +218,10 @@ arquivos (`docker-compose.yml`, `.env` e `ops-allowlist.json`).
 ## Validação
 
 ```bash
-npm ci --ignore-scripts
-npm audit --omit=dev --audit-level=low
-npm run check
-npm test
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm audit --prod --audit-level=low
+pnpm run check
+pnpm test
 docker compose config --quiet
 docker build --target mcp-runtime -t vps-observer-mcp:test .
 ```
