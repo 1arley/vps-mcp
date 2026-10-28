@@ -106,6 +106,51 @@ Em desenvolvimento local, construa a imagem no host e aponte
 
 O endpoint remoto é `https://SEU_DOMINIO/mcp` e cada chamada deve enviar `Authorization: Bearer SEU_TOKEN`. O Traefik publica somente `/mcp`; os healthchecks ficam internos.
 
+### Acesso sem domínio (via túnel SSH)
+
+Sem domínio, não use HTTP diretamente pela internet: o token bearer trafegaria sem criptografia. Para uso pessoal, publique a porta somente no loopback da VPS e acesse por um túnel SSH.
+
+1. No `.env`, defina o IP da VPS como host permitido, desative a descoberta pelo Traefik e desligue o proxy confiável:
+
+   ```env
+   MCP_DOMAIN=seu-dominio.com
+   TRAEFIK_ENABLE=false
+   TRUST_PROXY_HOPS=0
+   ```
+
+   Mantenha `AUTH_TOKEN_SHA256` configurado como na seção acima.
+
+2. Crie `docker-compose.ssh.yml` ao lado do `docker-compose.yml` para publicar a porta apenas localmente:
+
+   ```yaml
+   services:
+     mcp:
+       ports:
+         - "127.0.0.1:3000:3000"
+   ```
+
+   O Compose deste repositório ainda requer a rede externa `web`. Se a VPS não tiver Traefik, crie uma rede local com esse nome:
+
+   ```bash
+   docker network inspect web >/dev/null 2>&1 || docker network create web
+   ```
+
+3. Suba o serviço usando os dois arquivos:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.ssh.yml config --quiet
+   docker compose -f docker-compose.yml -f docker-compose.ssh.yml pull
+   docker compose -f docker-compose.yml -f docker-compose.ssh.yml up -d
+   ```
+
+4. No seu computador, abra o túnel e mantenha esse comando rodando:
+
+   ```bash
+   ssh -N -L 3000:127.0.0.1:3000 USUARIO_SSH@seu-dominio.com
+   ```
+
+   Configure o cliente MCP com `http://127.0.0.1:3000/mcp` e `Authorization: Bearer SEU_TOKEN`. O SSH criptografa o tráfego entre o cliente e a VPS; não configure o cliente para acessar `http://seu-dominio.com:3000` diretamente.
+
 ## Link para o agente MCP
 
 O que se entrega ao cliente/agente é exatamente esta URL + o bearer:

@@ -1,0 +1,92 @@
+{
+  "ops-allowlist.json": {
+    "mtime": 1793220177.858374,
+    "seen": 1793220186.714664,
+    "ast_hash": "49a28e2c6a69a16fd2a0720b7ef09260",
+    "semantic_hash": "49a28e2c6a69a16fd2a0720b7ef09260"
+  },
+  "package.json": {
+    "mtime": 1793220788.1743174,
+    "seen": 1793220805.6584618,
+    "ast_hash": "261e706c02a629c10515cbea9ba0cb4e",
+    "semantic_hash": ""
+  },
+  "test/docker-client.test.js": {
+    "mtime": 1793220327.8493366,
+    "seen": 1793220805.6584642,
+    "ast_hash": "1dc35bb349fb43d71f94fb49903922c9",
+    "semantic_hash": ""
+  },
+  "test/ops-tools.test.js": {
+    "mtime": 1793220327.8493366,
+    "seen": 1793220805.6584654,
+    "ast_hash": "137bf3d7fc91892416aadfc9e5967385",
+    "semantic_hash": ""
+  },
+  "test/server.test.js": {
+    "mtime": 1793220327.8493366,
+    "seen": 1793220805.658466,
+    "ast_hash": "cab577f9c16839c9514437aaa8f2fbfd",
+    "semantic_hash": ""
+  },
+  "docker-client.ts": {
+    "mtime": 1793220434.0335155,
+    "seen": 1793220805.6584527,
+    "ast_hash": "5f2129f26cd8ad706a2dd39a73f0477c",
+    "semantic_hash": ""
+  },
+  "ops-tools.ts": {
+    "mtime": 1793220482.1932423,
+    "seen": 1793220805.65846,
+    "ast_hash": "b4e832178ce9f146e613c19eabdcb461",
+    "semantic_hash": ""
+  },
+  "server.ts": {
+    "mtime": 1793220434.0341237,
+    "seen": 1793220805.658463,
+    "ast_hash": "06b8f46cdce92caf8de24084e2b61f04",
+    "semantic_hash": ""
+  },
+  "tsconfig.json": {
+    "mtime": 1793220364.057855,
+    "seen": 1793220805.6584668,
+    "ast_hash": "4c4ec42c5f5e05c71eb413fb391d7bce",
+    "semantic_hash": ""
+  },
+  ".github/workflows/build.yml": {
+    "mtime": 1793220519.1825857,
+    "seen": 1793220805.6584678,
+    "ast_hash": "455e87ecf6e1f80ed55bcdf37a91ba68",
+    "semantic_hash": ""
+  },
+  ".serena/project.yml": {
+    "mtime": 1793220194.141156,
+    "seen": 1793220805.6584687,
+    "ast_hash": "571a28acea56d8060bc94e5a83ec2ab3",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1793220482.2111602,
+    "seen": 1793220805.6584697,
+    "ast_hash": "a4a525a077fea75cc662fbe7b6fd6585",
+    "semantic_hash": ""
+  },
+  "SECURITY.md": {
+    "mtime": 1793220177.858374,
+    "seen": 1793220805.6584706,
+    "ast_hash": "bab3937791d67d00f286d0d94d372e66",
+    "semantic_hash": ""
+  },
+  "docker-compose.yml": {
+    "mtime": 1793220177.858374,
+    "seen": 1793220805.6584713,
+    "ast_hash": "d830d948cd3c833b05ccfe50ee3ac483",
+    "semantic_hash": ""
+  },
+  "pnpm-workspace.yaml": {
+    "mtime": 1793220788.1773586,
+    "seen": 1793220805.6584723,
+    "ast_hash": "d422806da2fc028a1c9f8a6b775cad6f",
+    "semantic_hash": ""
+  }
+}
